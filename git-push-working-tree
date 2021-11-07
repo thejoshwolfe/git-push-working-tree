@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+
+"""
+Run this command inside a git repo dir, and give the name of another host that has a matching git repo dir.
+This command will sync all non-ignored content to that git repo dir without touching your local state.
+
+This is similar to rsync, but uses pure git operations including a behind-the-scenes `git commit-tree`
+and `git push` directly into the .git directory of the remote repo.
+Then a few shell commands later, the behind-the-scenes commit is checked out into the remote working tree.
+
+This requires 2 consecutive ssh connections: one for `git push`, and one for the shell commands to checkout the commit.
+"""
+
+import os, sys, subprocess
+import re, shlex
+
+verbose = False
+dry_run = False
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("remote", metavar="host[:path]", help=
+        "The remote host as identified by ssh and an optional path to the repository to push to on that host. "
+        "host must only contain [A-Za-z0-9-] characters, "
+        "which means you might need to make an alias in .ssh/config for it. "
+        "If path is omitted, the default is the absolute path of the current repo's toplevel dir. "
+        "If the current repo is in the current user's home directory, "
+        "the home-relative path will be used on the remote. "
+        "I.e. ~/some/path will be translated as ~/some/path on the remote, "
+        "even if ~ expands to a different path in the two locations.")
+
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help=
+        "don't actually execute any of the commands that cause observable change.")
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        global verbose
+        verbose = True
+    if args.dry_run:
+        global dry_run
+        dry_run = True
+
+    repo_root = git("rev-parse", "--show-toplevel", cwd=None, mode="single_line")
+
+    # parse host:path
+    if ":" in args.remote:
+        host, path = args.remote.split(":", 1)
+        shell_safe_path = shlex.quote(path)
+    else:
+        host = args.remote
+        # infer default path.
+        home_relative_dir = relpath_down(repo_root, os.path.expanduser("~"))
+        if home_relative_dir != None:
+            path = os.path.join("~", home_relative_dir)
+            # leave the ~ outside the quote so it still works.
+            shell_safe_path = os.path.join("~", shlex.quote(home_relative_dir))
+        else:
+            path = repo_root
+            shell_safe_path = shlex.quote(path)
+
+    assert re.match(r"^[A-Za-z0-9-]+$", host) != None, repr(host)
+    remote = "{}:{}".format(host, path)
+
+    # what commit should we use?
+    head_commit_sha1 = git("rev-parse", "--verify", "HEAD", cwd=repo_root, mode="single_line")
+    status_lines = git("status",
+        "--no-renames", "--untracked-files=all", "-z",
+        cwd=repo_root, mode="null_terminated_bytes")
+    if len(status_lines) == 0:
+        commit_sha1 = head_commit_sha1
+    else:
+        commit_sha1 = make_ephemeral_commit(repo_root, head_commit_sha1, status_lines)
+
+    # git push
+    secret_ref = "refs/git-push-working-tree/SYNC_HEAD"
+    git("push",
+        remote, "{}:{}".format(commit_sha1, secret_ref),
+        "--force",
+        cwd=repo_root, mode="mutating")
+
+    # ssh and use the commit.
+    def encode_git_cmd(*args):
+        cmd = [
+            b"git",
+            b"-C", shell_safe_path.encode("utf8"),
+        ]
+        cmd.extend(args)
+        return b" ".join(cmd)
+    remote_script = b"".join(
+        line + b"\n" for line in [
+            b"set -e",
+            b"PREVIOUS_COMMIT=$(" + encode_git_cmd(b"rev-parse", b"--verify", b"HEAD") + b")",
+            encode_git_cmd(b"reset", commit_sha1.encode("utf8")),
+            encode_git_cmd(b"reset", b"--hard", b"-q", commit_sha1.encode("utf8")),
+            encode_git_cmd(b"clean", b"-ffd"),
+            encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
+        ]
+    )
+    if verbose:
+        if dry_run:
+            print("\nwould run on the remote: {\n")
+        else:
+            print("\nrunning on the remote: {\n")
+        print(remote_script.decode("utf8"))
+        print("}")
+    if not dry_run:
+        subprocess.run(["ssh", host, "/usr/bin/env", "sh"], input=remote_script, check=True)
+
+def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
+    # What deviates from HEAD?
+    deleted_paths = set()
+    modified_paths = [] # or added
+    for status_line in status_lines:
+        # XY PATH
+        # e.g: "?? git-push-working-tree"
+        path = re.match(rb"^.. (.*)$", status_line).group(1)
+        if os.path.exists(path):
+            modified_paths.append(path)
+        else:
+            deleted_paths.add(path)
+    modified_paths_set = set(modified_paths)
+
+    # What we're making:
+    tree_path_to_object_list = {
+        # b"": [ # root tree
+        #     b"040000 tree 322deb411efb0bda27a29d08ca9b7fb600f249e3\ta",
+        #     b"100644 blob 322deb411efb0bda27a29d08ca9b7fb600f249e3\tREADME.md,
+        # ],
+        # b"a": [ # subdirectory "a/"
+        #     b"100644 blob 322deb411efb0bda27a29d08ca9b7fb600f249e3\tfile.txt",
+        # ],
+    }
+    depth_to_tree_paths = {
+        # 0: [b""], # only the root is depth 0,
+        # 1: [b"a", ...],
+    }
+    submodule_paths = []
+    def add_object_to_parent_tree(parent_path, ls_tree_line):
+        try:
+            tree_path_to_object_list[parent_path].append(ls_tree_line)
+            return
+        except KeyError:
+            pass
+        # This is the first time we've seen this parent_path.
+        object_list = tree_path_to_object_list[parent_path] = []
+        object_list.append(ls_tree_line)
+
+        # Index the parent_path in our tree index.
+        if parent_path == b"":
+            depth = 0
+        else:
+            depth = len(parent_path.split(b"/"))
+        if depth not in depth_to_tree_paths:
+            depth_to_tree_paths[depth] = []
+        depth_to_tree_paths[depth].append(parent_path)
+
+    # Store all modified files in the .git directory and get a sha1 to point to each one.
+    # This will probably create objects in the .git directory.
+    modified_path_sha1s = git("hash-object",
+        "-t", "blob", "-w",
+        *modified_paths,
+        cwd=repo_root, mode="newline_terminated_bytes")
+    for path, sha1 in zip(modified_paths, modified_path_sha1s):
+        ls_tree_line = b"%b %b %b\t%b" % (
+            (b"100755" if os.access(path, os.X_OK) else b"100644"), # mode
+            b"blob", # type
+            sha1, # sha1
+            os.path.basename(path), # name
+        )
+        add_object_to_parent_tree(os.path.dirname(path), ls_tree_line)
+
+    # Fill in everything that's unchanged from the HEAD tree.
+    ls_tree_lines = git("ls-tree",
+        "-r", "--full-tree", "-z",
+        head_commit_sha1, cwd=repo_root, mode="null_terminated_bytes")
+    for ls_tree_line in ls_tree_lines:
+        # <mode> SP <type> SP <object> TAB <file>
+        # e.g: 100644 blob 322deb411efb0bda27a29d08ca9b7fb600f249e3	README.md
+        (mode, type_, sha1, path) = re.match(rb"^(\S*) (\S*) (\S*)\t(.*)$", ls_tree_line).groups()
+        if type_ == b"commit":
+            # this is a submodule
+            submodule_paths.append(path)
+            continue
+        if path in deleted_paths:
+            # omit deleted items.
+            continue
+        if path in modified_paths_set:
+            # already accounted for.
+            continue
+        add_object_to_parent_tree(os.path.dirname(path), ls_tree_line)
+
+    assert len(submodule_paths) == 0, "TODO: submodule fun times"
+
+    # Construct a new root tree by iterating from the depths upward.
+    for depth in range(max(depth_to_tree_paths.keys()), -1, -1):
+        tree_paths = depth_to_tree_paths[depth]
+        tree_sha1s = git("mktree",
+            "-z", "--batch",
+            input=b"".join(
+                b"".join(
+                    ls_tree_line + b"\x00"
+                    for ls_tree_line in tree_path_to_object_list[tree_path]
+                ) + b"\x00"
+                for tree_path in tree_paths
+            ),
+            cwd=repo_root,
+            mode="newline_terminated_bytes",
+        )
+        if depth == 0:
+            # Stop at the root tree.
+            [root_tree_sha1] = tree_sha1s
+            break
+        # The trees themsevles are now objects for their parents 1 level up.
+        for tree_path, tree_sha1 in zip(tree_paths, tree_sha1s):
+            ls_tree_line = b"%b %b %b\t%b" % (
+                b"040000", # mode
+                b"tree", # type
+                tree_sha1, # sha1
+                os.path.basename(tree_path), # name
+            )
+            add_object_to_parent_tree(os.path.dirname(tree_path), ls_tree_line)
+    else:
+        assert False, "never found the root tree?"
+
+    # Create a commit with this tree, HEAD as the parent,
+    # and constant dummy data for everything else.
+    dummy_name = "Nobody"
+    dummy_email = "nobody@bogus.invalid"
+    # This is the earliest timestamp git will accept without an error.
+    dummy_date = "100000000 +0000" # Sat Mar 3 09:46:40 1973 +0000
+    commit_sha1 = git(
+        "-c", "author.name={}".format(dummy_name),
+        "-c", "author.email={}".format(dummy_email),
+        "-c", "committer.name={}".format(dummy_name),
+        "-c", "committer.email={}".format(dummy_email),
+        "commit-tree",
+        root_tree_sha1,
+        "-p", head_commit_sha1,
+        "-m", "(auto generated)",
+        env_updates={
+            "GIT_AUTHOR_DATE": dummy_date,
+            "GIT_COMMITTER_DATE": dummy_date,
+        },
+        cwd=repo_root,
+        mode="single_line")
+
+    return commit_sha1
+
+def git(*args, cwd, mode, input=None, env_updates=None):
+    cmd = ["git"]
+    cmd.extend(args)
+
+    if env_updates:
+        env = os.environ.copy()
+        env.update(env_updates)
+    else:
+        env=None
+
+    if mode == "mutating":
+        assert input == None
+        if verbose:
+            shell_script = " ".join(shlex.quote(arg) for arg in cmd)
+            if env_updates:
+                shell_script = " ".join(
+                    "{}={}".format(shlex.quote(name), shlex.quote(value))
+                    for name, value in sorted(env_updates.items())
+                ) + " " + shell_script
+            if cwd != None:
+                shell_script = "(cd {} && {})".format(shlex.quote(cwd), shell_script)
+            if dry_run:
+                shell_script = "# " + shell_script
+            print(shell_script)
+        if not dry_run:
+            subprocess.check_call(cmd, cwd=cwd, env=env)
+        return None
+
+    # read-only or otherwise no-observable-change command.
+    output = subprocess.check_output(cmd, cwd=cwd, input=input, env=env)
+    if mode == "single_line":
+        lines = output.decode("utf8").split("\n")
+        assert lines[-1] == ""
+        [line] = lines[:-1]
+        return line
+    elif mode == "null_terminated_bytes":
+        lines = output.split(b"\x00")
+        assert lines[-1] == b""
+        return lines[:-1]
+    elif mode == "newline_terminated_bytes":
+        lines = output.split(b"\n")
+        assert lines[-1] == b""
+        return lines[:-1]
+    else:
+        assert False, mode
+
+def relpath_down(path, start):
+    """
+    like os.path.relpath, but returns None if the path would go ../up.
+    """
+    path = os.path.abspath(path)
+    start = os.path.abspath(start)
+    try:
+        common_prefix = os.path.commonpath([path, start])
+    except ValueError:
+        # Different drives in Windows or something.
+        return None
+    if start != os.path.commonpath([start, common_prefix]):
+        # The common path is above the start dir, so this would need to go ../up.
+        return None
+    return os.path.relpath(path, start)
+
+if __name__ == "__main__":
+    main()
