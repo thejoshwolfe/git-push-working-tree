@@ -20,15 +20,17 @@ dry_run = False
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("remote", metavar="host[:path]", help=
-        "The remote host as identified by ssh and an optional path to the repository to push to on that host. "
-        "host must only contain [A-Za-z0-9-] characters, "
-        "which means you might need to make an alias in .ssh/config for it. "
-        "If path is omitted, the default is the absolute path of the current repo's toplevel dir. "
-        "If the current repo is in the current user's home directory, "
-        "the home-relative path will be used on the remote. "
-        "I.e. ~/some/path will be translated as ~/some/path on the remote, "
-        "even if ~ expands to a different path in the two locations.")
+    parser.add_argument("remote", metavar="{host[:path]|path}", help=
+        "The remote host and/or the path to the destination repository. "
+        "The host, if given, must be usable by ssh, and must only contain [A-Za-z0-9-] characters, "
+        "which means you probably need an alias in .ssh/config for it. "
+        "If host is given and path is omitted, "
+        "the default path is either the absolute path of the current repo's toplevel dir, "
+        "or if the current repo is in the current user's home directory, "
+        "then the default path is the home-relative path; "
+        "i.e. ~/some/path will be translated as ~/some/path on the remote, "
+        "even if ~ expands to a different path in the two locations. "
+        "If no host is specified, the path must contain '/' and be a directory on the local machine.")
 
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help=
@@ -49,6 +51,10 @@ def main():
     if ":" in args.remote:
         host, path = args.remote.split(":", 1)
         shell_safe_path = shlex.quote(path)
+    elif "/" in args.remote:
+        host = None
+        path = os.path.abspath(args.remote)
+        shell_safe_path = shlex.quote(path)
     else:
         host = args.remote
         # infer default path.
@@ -61,8 +67,11 @@ def main():
             path = repo_root
             shell_safe_path = shlex.quote(path)
 
-    assert re.match(r"^[A-Za-z0-9-]+$", host) != None, repr(host)
-    remote = "{}:{}".format(host, path)
+    if host != None:
+        assert re.match(r"^[A-Za-z0-9-]+$", host) != None, repr(host)
+        remote = "{}:{}".format(host, path)
+    else:
+        remote = path
 
     # what commit should we use?
     head_commit_sha1 = git("rev-parse", "--verify", "HEAD", cwd=repo_root, mode="single_line")
@@ -81,7 +90,7 @@ def main():
         "--force",
         cwd=repo_root, mode="mutating")
 
-    # ssh and use the commit.
+    # use the commit.
     def encode_git_cmd(*args):
         cmd = [
             b"git",
@@ -99,15 +108,29 @@ def main():
             encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
         ]
     )
-    if verbose:
-        if dry_run:
-            print("\nwould run on the remote: {\n")
-        else:
-            print("\nrunning on the remote: {\n")
-        print(remote_script.decode("utf8"))
-        print("}")
-    if not dry_run:
-        subprocess.run(["ssh", host, "/usr/bin/env", "sh"], input=remote_script, check=True)
+
+    if host != None:
+        # ssh
+        if verbose:
+            if dry_run:
+                print("\nwould run on the remote: {\n")
+            else:
+                print("\nrunning on the remote: {\n")
+            print(remote_script.decode("utf8"))
+            print("}")
+        if not dry_run:
+            subprocess.run(["ssh", host, "/usr/bin/env", "sh"], input=remote_script, check=True)
+    else:
+        # local
+        if verbose:
+            if dry_run:
+                print("\nwould run: {\n")
+            else:
+                print("\nrunning: {\n")
+            print(remote_script.decode("utf8"))
+            print("}")
+        if not dry_run:
+            subprocess.run(["/usr/bin/env", "sh"], input=remote_script, check=True)
 
 def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
     # What deviates from HEAD?
