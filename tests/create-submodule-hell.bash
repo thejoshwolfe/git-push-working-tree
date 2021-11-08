@@ -108,12 +108,9 @@ git -C git-hell-1/sub reset --hard origin/main
 git -C git-hell-1 add -A
 git -C git-hell-1 commit -m "update submodule"
 git -C git-hell-1 tag submodule-updated-submodule-readded
+git -C git-hell-1/sub config --unset submodule.sub.url
 rm -rf git-hell-1/.git/modules/sub/modules/sub
-# i cannot figure out how to do this without any git error.
-git -C git-hell-1 submodule update --init --recursive || (
-    git -C git-hell-1 submodule sync --recursive
-    git -C git-hell-1 submodule update --init --recursive
-)
+git -C git-hell-1 submodule update --init --recursive
 
 
 # in place update of submodule to have completely different url and contents
@@ -133,8 +130,5 @@ git -C git-hell-1/sub reset --hard origin/main
 git -C git-hell-1 add -A
 git -C git-hell-1 commit -m "update submodule"
 git -C git-hell-1 tag submodule-updated-submodule-replaced
-# i cannot figure out how to do this without any git error.
-git -C git-hell-1 submodule update --init --recursive || (
-    git -C git-hell-1 submodule sync --recursive
-    git -C git-hell-1 submodule update --init --recursive
-)
+git -C git-hell-1 submodule sync --recursive
+git -C git-hell-1 submodule update --init --recursive
