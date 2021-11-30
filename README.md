@@ -14,11 +14,11 @@ Then the program sshes to the destination and checks out the secret commit. This
 
 ## Status
 
-* [+] Syncs committed, `--cached`, uncommitted, and untracked changes.
-* [+] Syncing includes deleting what shouldn't exist.
-* [+] Ignores `.gitignore` ignored files on both sides.
-* [+] Causes no observable changes to the git state on the source side.
-* [+] Causes no lasting observable changes to the git state on the destination side. (TODO: check for observable changes to `--cached` changes on the destination side.)
+* [x] Syncs committed, `--cached`, uncommitted, and untracked changes.
+* [x] Syncing includes deleting what shouldn't exist.
+* [x] Ignores `.gitignore` ignored files on both sides.
+* [x] Causes no observable changes to the git state on the source side.
+* [x] Causes no lasting observable changes to the git state on the destination side. (TODO: check for observable changes to `--cached` changes on the destination side.)
 * [ ] Syncing the initialized/uninitialized state of each submodule from source to dest. (TODO: what does "initialized" even mean for a submodule? What are all the states a submodule can be in?)
 * [ ] Syncing changing the commit of a submodule.
 * [ ] Syncing working tree changes in a submodule.
