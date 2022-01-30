@@ -9,6 +9,12 @@ and `git push` directly into the .git directory of the remote repo.
 Then a few shell commands later, the behind-the-scenes commit is checked out into the remote working tree.
 
 This requires 2 consecutive ssh connections: one for `git push`, and one for the shell commands to checkout the commit.
+
+When submodules are involved, and additional ssh connetion will be made for each submodule.
+This program cannot synchronize changes to the existence or identities of submodules.
+For example, changin the url, changing the checkout path, changing the name (which is different from the path),
+or initializing or deinitializing a submodule will all cause undefined behavior in this script.
+(And don't even think about creating two unrelated submodules with the same name in a repo over multiple commits.)
 """
 
 import os, sys, subprocess
