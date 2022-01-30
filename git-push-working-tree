@@ -106,8 +106,14 @@ def main():
 
         # git push
         secret_ref = "refs/git-push-working-tree/SYNC_HEAD"
+        maybe_quiet = ["-q"]
+        if verbose:
+            maybe_quiet = []
         git("push",
-            os.path.join(remote, module_path.decode("utf8")), "--force", "{}:{}".format(commit_sha1.decode("utf8"), secret_ref),
+            "--force",
+            os.path.join(remote, module_path.decode("utf8")),
+            "{}:{}".format(commit_sha1.decode("utf8"), secret_ref),
+            *maybe_quiet,
             cwd=module_dir, mode="mutating")
 
     # use the commits.
@@ -168,7 +174,7 @@ def make_ephemeral_commit(module_dir, module_path, head_commit_sha1, status_line
         # XY PATH
         # e.g: "?? git-push-working-tree"
         path = re.match(rb"^.. (.*)$", status_line).group(1)
-        if os.path.exists(path):
+        if os.path.exists(os.path.join(module_dir, path.decode("utf8"))):
             modified_paths.append(path)
         else:
             deleted_paths.add(path)
