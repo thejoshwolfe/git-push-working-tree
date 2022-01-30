@@ -9,6 +9,12 @@ and `git push` directly into the .git directory of the remote repo.
 Then a few shell commands later, the behind-the-scenes commit is checked out into the remote working tree.
 
 This requires 2 consecutive ssh connections: one for `git push`, and one for the shell commands to checkout the commit.
+
+When submodules are involved, and additional ssh connetion will be made for each submodule.
+This program cannot synchronize changes to the existence or identities of submodules.
+For example, changin the url, changing the checkout path, changing the name (which is different from the path),
+or initializing or deinitializing a submodule will all cause undefined behavior in this script.
+(And don't even think about creating two unrelated submodules with the same name in a repo over multiple commits.)
 """
 
 import os, sys, subprocess
@@ -66,6 +72,7 @@ def main():
         else:
             path = repo_root
             shell_safe_path = shlex.quote(path)
+    shell_safe_path = shell_safe_path.encode("utf8")
 
     if host != None:
         assert re.match(r"^[A-Za-z0-9-]+$", host) != None, repr(host)
@@ -73,41 +80,74 @@ def main():
     else:
         remote = path
 
-    # what commit should we use?
-    head_commit_sha1 = git("rev-parse", "--verify", "HEAD", cwd=repo_root, mode="single_line")
-    status_lines = git("status",
-        "--no-renames", "--untracked-files=all", "-z",
-        cwd=repo_root, mode="null_terminated_bytes")
-    if len(status_lines) == 0:
-        commit_sha1 = head_commit_sha1
-    else:
-        commit_sha1 = make_ephemeral_commit(repo_root, head_commit_sha1, status_lines)
+    # how many submodules we dealing with?
+    submodule_paths = git("submodule", "foreach",
+        "--quiet", "--recursive",
+        "echo $displaypath",
+        cwd=repo_root, mode="newline_terminated_bytes")
+    submodule_path_set = set(submodule_paths)
+    all_module_paths = [b"."] + submodule_paths
+    # reverse order processes children before parents
+    all_module_paths.reverse()
 
-    # git push
-    secret_ref = "refs/git-push-working-tree/SYNC_HEAD"
-    git("push",
-        remote, "{}:{}".format(commit_sha1, secret_ref),
-        "--force",
-        cwd=repo_root, mode="mutating")
+    module_commit_sha1s = {}
+    for module_path in all_module_paths:
+        module_dir = os.path.join(repo_root, module_path.decode("utf8"))
 
-    # use the commit.
-    def encode_git_cmd(*args):
-        cmd = [
-            b"git",
-            b"-C", shell_safe_path.encode("utf8"),
+        # what's changed from head?
+        head_commit_sha1 = git("rev-parse", "--verify", "HEAD", cwd=module_dir, mode="single_line_bytes")
+        status_lines = [
+            line for line in git("status",
+                "--no-renames", "--untracked-files=all", "-z",
+                cwd=module_dir, mode="null_terminated_bytes")
+            if line[len(b"?? "):] not in submodule_path_set
         ]
-        cmd.extend(args)
-        return b" ".join(cmd)
-    remote_script = b"".join(
-        line + b"\n" for line in [
-            b"set -e",
-            b"PREVIOUS_COMMIT=$(" + encode_git_cmd(b"rev-parse", b"--verify", b"HEAD") + b")",
-            encode_git_cmd(b"reset", commit_sha1.encode("utf8")),
-            encode_git_cmd(b"reset", b"--hard", b"-q", commit_sha1.encode("utf8")),
-            encode_git_cmd(b"clean", b"-ffd"),
-            encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
-        ]
-    )
+
+        # what commit should we use?
+        if len(status_lines) == 0:
+            commit_sha1 = head_commit_sha1
+        else:
+            commit_sha1 = make_ephemeral_commit(module_dir, module_path, head_commit_sha1, status_lines, module_commit_sha1s)
+        module_commit_sha1s[module_path] = commit_sha1
+
+        # git push
+        secret_ref = "refs/git-push-working-tree/SYNC_HEAD"
+        maybe_quiet = ["-q"]
+        if verbose:
+            maybe_quiet = []
+        git("push",
+            "--force",
+            os.path.join(remote, module_path.decode("utf8")),
+            "{}:{}".format(commit_sha1.decode("utf8"), secret_ref),
+            *maybe_quiet,
+            cwd=module_dir, mode="mutating")
+
+    # use the commits.
+    remote_script_parts = []
+    for module_path in all_module_paths:
+        def encode_git_cmd(*args, use_root_git_dir=False):
+            cmd = [b"git"]
+            if module_path == b".":
+                cmd.extend([b"-C", shell_safe_path])
+            else:
+                cmd.extend([b"-C", os.path.join(shell_safe_path, module_path)])
+            cmd.extend(args)
+            return b" ".join(cmd)
+        commit_sha1 = module_commit_sha1s[module_path]
+        module_script = b"".join(
+            line + b"\n" for line in [
+                b"PREVIOUS_COMMIT=$(" + encode_git_cmd(b"rev-parse", b"--verify", b"HEAD") + b")",
+                encode_git_cmd(b"reset", commit_sha1, use_root_git_dir=True),
+                encode_git_cmd(b"reset", b"--hard", b"-q", commit_sha1),
+                encode_git_cmd(b"clean", b"-ffd"),
+                encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
+            ]
+        )
+        remote_script_parts.append(module_script)
+
+    remote_script = b"\n".join([
+        b"set -e\n",
+    ] + remote_script_parts)
 
     if host != None:
         # ssh
@@ -132,7 +172,7 @@ def main():
         if not dry_run:
             subprocess.run(["/usr/bin/env", "sh"], input=remote_script, check=True)
 
-def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
+def make_ephemeral_commit(module_dir, module_path, head_commit_sha1, status_lines, module_commit_sha1s):
     # What deviates from HEAD?
     deleted_paths = set()
     modified_paths = [] # or added
@@ -140,7 +180,7 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
         # XY PATH
         # e.g: "?? git-push-working-tree"
         path = re.match(rb"^.. (.*)$", status_line).group(1)
-        if os.path.exists(path):
+        if os.path.exists(os.path.join(module_dir, path.decode("utf8"))):
             modified_paths.append(path)
         else:
             deleted_paths.add(path)
@@ -160,7 +200,6 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
         # 0: [b""], # only the root is depth 0,
         # 1: [b"a", ...],
     }
-    submodule_paths = []
     def add_object_to_parent_tree(parent_path, ls_tree_line):
         try:
             tree_path_to_object_list[parent_path].append(ls_tree_line)
@@ -185,7 +224,7 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
     modified_path_sha1s = git("hash-object",
         "-t", "blob", "-w",
         *modified_paths,
-        cwd=repo_root, mode="newline_terminated_bytes")
+        cwd=module_dir, mode="newline_terminated_bytes")
     for path, sha1 in zip(modified_paths, modified_path_sha1s):
         ls_tree_line = b"%b %b %b\t%b" % (
             (b"100755" if os.access(path, os.X_OK) else b"100644"), # mode
@@ -198,24 +237,25 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
     # Fill in everything that's unchanged from the HEAD tree.
     ls_tree_lines = git("ls-tree",
         "-r", "--full-tree", "-z",
-        head_commit_sha1, cwd=repo_root, mode="null_terminated_bytes")
+        head_commit_sha1.decode("utf8"),
+        cwd=module_dir, mode="null_terminated_bytes")
     for ls_tree_line in ls_tree_lines:
         # <mode> SP <type> SP <object> TAB <file>
         # e.g: 100644 blob 322deb411efb0bda27a29d08ca9b7fb600f249e3	README.md
         (mode, type_, sha1, path) = re.match(rb"^(\S*) (\S*) (\S*)\t(.*)$", ls_tree_line).groups()
         if type_ == b"commit":
             # this is a submodule
-            submodule_paths.append(path)
-            continue
+            super_submodule_path = os.path.normpath(os.path.join(module_path, path))
+            sha1 = module_commit_sha1s[super_submodule_path]
         if path in deleted_paths:
             # omit deleted items.
             continue
         if path in modified_paths_set:
             # already accounted for.
             continue
+        # strip the directory part of the path for the ls_tree_line.
+        ls_tree_line = b"%s %s %s\t%s" % (mode, type_, sha1, os.path.basename(path))
         add_object_to_parent_tree(os.path.dirname(path), ls_tree_line)
-
-    assert len(submodule_paths) == 0, "TODO: submodule fun times"
 
     # Construct a new root tree by iterating from the depths upward.
     for depth in range(max(depth_to_tree_paths.keys()), -1, -1):
@@ -229,7 +269,7 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
                 ) + b"\x00"
                 for tree_path in tree_paths
             ),
-            cwd=repo_root,
+            cwd=module_dir,
             mode="newline_terminated_bytes",
         )
         if depth == 0:
@@ -261,14 +301,14 @@ def make_ephemeral_commit(repo_root, head_commit_sha1, status_lines):
         "-c", "committer.email={}".format(dummy_email),
         "commit-tree",
         root_tree_sha1,
-        "-p", head_commit_sha1,
+        "-p", head_commit_sha1.decode("utf8"),
         "-m", "(auto generated)",
         env_updates={
             "GIT_AUTHOR_DATE": dummy_date,
             "GIT_COMMITTER_DATE": dummy_date,
         },
-        cwd=repo_root,
-        mode="single_line")
+        cwd=module_dir,
+        mode="single_line_bytes")
 
     return commit_sha1
 
@@ -302,6 +342,11 @@ def git(*args, cwd, mode, input=None, env_updates=None):
 
     # read-only or otherwise no-observable-change command.
     output = subprocess.check_output(cmd, cwd=cwd, input=input, env=env)
+    if mode == "single_line_bytes":
+        lines = output.split(b"\n")
+        assert lines[-1] == b""
+        [line] = lines[:-1]
+        return line
     if mode == "single_line":
         lines = output.decode("utf8").split("\n")
         assert lines[-1] == ""

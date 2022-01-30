@@ -20,13 +20,13 @@ Then the program sshes to the destination and checks out the secret commit. This
 * [x] Causes no observable changes to the git state on the source side.
 * [x] Causes no lasting observable changes to the git state on the destination side. (TODO: check for observable changes to `--cached` changes on the destination side.)
 * [ ] Syncing the initialized/uninitialized state of each submodule from source to dest. (TODO: what does "initialized" even mean for a submodule? What are all the states a submodule can be in?)
-* [ ] Syncing changing the commit of a submodule.
-* [ ] Syncing working tree changes in a submodule.
+* [x] Syncing changing the commit of a submodule.
+* [x] Syncing working tree changes in a submodule.
 * [ ] Syncing addition of a submodule.
 * [ ] Syncing removal of a submodule.
 * [ ] Syncing url changes to a submodule.
 * [ ] Syncing in-place replacement of a submodule with an incompatible repo (not properly supported by git itself, so maybe this will never work).
-* [ ] Syncing all the above about submodules recursively in submodules' own submodules.
+* [x] Syncing all the above about submodules recursively in submodules' own submodules.
 * [ ] Syncing changes to `.gitignore` in a way that makes sense. (TODO: how should this even work?)
 
 ## Usage
