@@ -41,6 +41,18 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help=
         "don't actually execute any of the commands that cause observable change.")
+    parser.add_argument("-e", "--eval", action="append", help=
+        "evaluate shell program(s) on the remote after a successful sync. "
+        "Synchronization always requires an ssh connection to run "
+        "`git reset` and other commands on the remote. "
+        "This command line parameter allows you to append your own shell programs to the script. "
+        "The script will be fed as stdin to the remote shell, "
+        "which means you don't need any extra escaping "
+        "(that would be necessary in a context like `ssh host <script>`), "
+        "and you don't have access to read from stdin in your script. "
+        "Multiple scripts given with this command line parameter will be separated by newlines. "
+        "No validation is done on the scripts given; use this feature at your own risk. "
+        "TIP: use --verbose and/or --dry-run to see the final formatted script that will be run on the remote.")
 
     args = parser.parse_args()
 
@@ -137,13 +149,15 @@ def main():
         module_script = b"".join(
             line + b"\n" for line in [
                 b"PREVIOUS_COMMIT=$(" + encode_git_cmd(b"rev-parse", b"--verify", b"HEAD") + b")",
-                encode_git_cmd(b"reset", commit_sha1, use_root_git_dir=True),
-                encode_git_cmd(b"reset", b"--hard", b"-q", commit_sha1),
+                encode_git_cmd(b"reset", b"--quiet", commit_sha1, use_root_git_dir=True),
+                encode_git_cmd(b"reset", b"--hard", b"--quiet", commit_sha1),
                 encode_git_cmd(b"clean", b"-ffd"),
                 encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
             ]
         )
         remote_script_parts.append(module_script)
+    for script in args.eval:
+        remote_script_parts.append(script.encode("utf8"))
 
     remote_script = b"\n".join([
         b"set -e\n",
