@@ -156,7 +156,7 @@ def main():
             ]
         )
         remote_script_parts.append(module_script)
-    for script in args.eval:
+    for script in args.eval or []:
         remote_script_parts.append(script.encode("utf8"))
 
     remote_script = b"\n".join([
