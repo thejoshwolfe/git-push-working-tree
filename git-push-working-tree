@@ -10,9 +10,9 @@ Then a few shell commands later, the behind-the-scenes commit is checked out int
 
 This requires 2 consecutive ssh connections: one for `git push`, and one for the shell commands to checkout the commit.
 
-When submodules are involved, and additional ssh connetion will be made for each submodule.
+When submodules are involved, and additional ssh connection will be made for each submodule.
 This program cannot synchronize changes to the existence or identities of submodules.
-For example, changin the url, changing the checkout path, changing the name (which is different from the path),
+For example, changing the url, changing the checkout path, changing the name (which is different from the path),
 or initializing or deinitializing a submodule will all cause undefined behavior in this script.
 (And don't even think about creating two unrelated submodules with the same name in a repo over multiple commits.)
 """
@@ -40,9 +40,9 @@ def main():
 
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help=
-        "don't actually execute any of the commands that cause observable change.")
+        "Don't actually execute any of the commands that cause observable change.")
     parser.add_argument("-e", "--eval", action="append", help=
-        "evaluate shell program(s) on the remote after a successful sync. "
+        "Evaluate shell program(s) on the remote after a successful sync. "
         "Synchronization always requires an ssh connection to run "
         "`git reset` and other commands on the remote. "
         "This command line parameter allows you to append your own shell programs to the script. "
@@ -148,11 +148,9 @@ def main():
         commit_sha1 = module_commit_sha1s[module_path]
         module_script = b"".join(
             line + b"\n" for line in [
-                b"PREVIOUS_COMMIT=$(" + encode_git_cmd(b"rev-parse", b"--verify", b"HEAD") + b")",
                 encode_git_cmd(b"reset", b"--quiet", commit_sha1, use_root_git_dir=True),
                 encode_git_cmd(b"reset", b"--hard", b"--quiet", commit_sha1),
                 encode_git_cmd(b"clean", b"-ffd"),
-                encode_git_cmd(b"reset", b'"${PREVIOUS_COMMIT}"'),
             ]
         )
         remote_script_parts.append(module_script)
