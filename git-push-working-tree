@@ -87,7 +87,7 @@ def main():
     shell_safe_path = shell_safe_path.encode("utf8")
 
     if host != None:
-        assert re.match(r"^[A-Za-z0-9-]+$", host) != None, repr(host)
+        assert re.match(r"^[A-Za-z0-9.-]+$", host) != None, repr(host)
         remote = "{}:{}".format(host, path)
     else:
         remote = path
