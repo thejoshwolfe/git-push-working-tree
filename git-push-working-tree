@@ -239,7 +239,7 @@ def make_ephemeral_commit(module_dir, module_path, head_commit_sha1, status_line
         cwd=module_dir, mode="newline_terminated_bytes")
     for path, sha1 in zip(modified_paths, modified_path_sha1s):
         ls_tree_line = b"%b %b %b\t%b" % (
-            (b"100755" if os.access(path, os.X_OK) else b"100644"), # mode
+            (b"100755" if os.access(os.path.join(module_dir, path.decode("utf8")), os.X_OK) else b"100644"), # mode
             b"blob", # type
             sha1, # sha1
             os.path.basename(path), # name
